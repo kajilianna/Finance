@@ -1,0 +1,174 @@
+# 双均线策略 - 人工智能通识课项目
+# 策略逻辑：5日均线上穿20日均线买入（金叉），下穿卖出（死叉）
+# 功能：显示余额、亏损提醒、每日明细、成交价格记录
+
+from gm.api import *
+
+def init(context):
+    # 交易标的：平安银行（可修改为其他股票）
+    context.symbol = 'SZSE.000001'
+    # 短期均线周期
+    context.short_window = 5
+    # 长期均线周期
+    context.long_window = 20
+    
+    # 记录上次买入价格（用于计算盈亏）
+    context.last_buy_price = 0
+    
+    # 订阅行情数据
+    subscribe(symbols=context.symbol, frequency='1d', count=context.long_window + 1)
+
+def get_cash_and_assets(account):
+    """
+    从account对象中提取可用现金和总资产
+    掘金SDK中返回的是DictLikeObject，需要用['key']取值
+    """
+    # 获取可用现金
+    if hasattr(account, 'cash') and isinstance(account.cash, dict):
+        cash = account.cash.get('available', 0)
+    elif hasattr(account, 'cash'):
+        # 如果cash本身就是数值
+        cash = float(account.cash) if account.cash else 0
+    else:
+        cash = 0
+    
+    # 获取持仓市值
+    try:
+        if hasattr(account, 'market_value') and isinstance(account.market_value, dict):
+            market_value = account.market_value.get('total', 0)
+        elif hasattr(account, 'market_value'):
+            market_value = float(account.market_value) if account.market_value else 0
+        else:
+            market_value = 0
+    except:
+        market_value = 0
+    
+    return cash, cash + market_value
+
+def on_bar(context, bars):
+    symbol = context.symbol
+    
+    # 获取当前时间
+    now = context.now
+    
+    # 获取当前账户信息
+    account = context.account()
+    cash, total_assets = get_cash_and_assets(account)
+    
+    # 计算回看日期
+    from datetime import timedelta
+    start_date = (now - timedelta(days=context.long_window + 10)).strftime('%Y-%m-%d')
+    end_date = now.strftime('%Y-%m-%d')
+    
+    # 获取历史收盘价
+    hist = history(symbol=symbol, frequency='1d', 
+                   start_time=start_date, 
+                   end_time=end_date,
+                   fields='close', 
+                   df=True)
+    
+    # 如果数据不足，跳过
+    if hist is None or len(hist) < context.long_window:
+        return
+    
+    # 计算短期和长期均线
+    short_ma = hist['close'][-context.short_window:].mean()
+    long_ma = hist['close'][-context.long_window:].mean()
+    
+    # 获取当前持仓
+    position = context.account().position(symbol, side=PositionSide_Long)
+    has_position = position.volume > 0 if position else False
+    
+    # 获取当前价格（最新收盘价）
+    current_price = hist['close'].iloc[-1]
+    
+    # ========== 每日明细输出 ==========
+    print(f"\n{'='*60}")
+    print(f"📅 日期: {now.strftime('%Y-%m-%d')}")
+    print(f"📊 标的: {symbol}")
+    print(f"💰 可用现金: {cash:.2f} 元")
+    print(f"💎 总资产: {total_assets:.2f} 元")
+    
+    if has_position:
+        print(f"📈 持仓数量: {position.volume} 股")
+        print(f"💵 持仓市值: {position.volume * current_price:.2f} 元")
+        print(f"📉 当前价格: {current_price:.2f} 元")
+        if context.last_buy_price > 0:
+            profit_pct = (current_price - context.last_buy_price) / context.last_buy_price * 100
+            print(f"📊 持仓盈亏: {profit_pct:.2f}%")
+    else:
+        print(f"📭 当前持仓: 空仓")
+    
+    print(f"📈 短均线(5日): {short_ma:.2f}")
+    print(f"📉 长均线(20日): {long_ma:.2f}")
+    print(f"{'='*60}\n")
+    
+    # ========== 交易信号判断 ==========
+    
+    # 金叉买入信号
+    if short_ma > long_ma and not has_position:
+        # 执行买入
+        order_percent(symbol, percent=1, side=OrderSide_Buy,
+                      order_type=OrderType_Market, position_effect=PositionEffect_Open)
+        
+        # 记录买入价格
+        context.last_buy_price = current_price
+        
+        # 买入后重新获取账户信息
+        account_after = context.account()
+        cash_after, total_assets_after = get_cash_and_assets(account_after)
+        
+        print(f"\n🔥🔥🔥 【买入信号】{now.strftime('%Y-%m-%d')} 🔥🔥🔥")
+        print(f"✅ 买入 {symbol}")
+        print(f"💰 买入价: {current_price:.2f} 元")
+        print(f"💵 买入后可用现金: {cash_after:.2f} 元")
+        print(f"💎 买入后总资产: {total_assets_after:.2f} 元\n")
+    
+    # 死叉卖出信号
+    elif short_ma < long_ma and has_position:
+        # 记录卖出价格
+        sell_price = current_price
+        
+        # 计算盈亏
+        if context.last_buy_price > 0:
+            profit = (sell_price - context.last_buy_price) * position.volume
+            profit_pct = (sell_price - context.last_buy_price) / context.last_buy_price * 100
+        
+        # 执行卖出
+        order_percent(symbol, percent=1, side=OrderSide_Sell,
+                      order_type=OrderType_Market, position_effect=PositionEffect_Close)
+        
+        # 卖出后重新获取账户信息
+        account_after = context.account()
+        cash_after, total_assets_after = get_cash_and_assets(account_after)
+        
+        print(f"\n💨💨💨 【卖出信号】{now.strftime('%Y-%m-%d')} 💨💨💨")
+        print(f"✅ 卖出 {symbol}")
+        print(f"💰 卖出价: {sell_price:.2f} 元")
+        print(f"💰 买入价: {context.last_buy_price:.2f} 元")
+        print(f"📊 本次盈亏: {profit:.2f} 元 ({profit_pct:.2f}%)")
+        print(f"💵 卖出后可用现金: {cash_after:.2f} 元")
+        print(f"💎 卖出后总资产: {total_assets_after:.2f} 元")
+        
+        # ========== 亏钱时发出提醒 ==========
+        if profit < 0:
+            print(f"\n⚠️⚠️⚠️ 【亏损提醒】⚠️⚠️⚠️")
+            print(f"本次交易亏损: {profit:.2f} 元 ({profit_pct:.2f}%)")
+            print(f"策略建议：可考虑加入移动止损条件\n")
+        else:
+            print(f"🎉 本次交易盈利: {profit:.2f} 元 ({profit_pct:.2f}%)\n")
+        
+        # 重置买入价格
+        context.last_buy_price = 0
+
+
+if __name__ == '__main__':
+    run(strategy_id='c394b082-5ee6-11f1-8f08-40c2bab10bb9',  # 替换成你的策略ID
+        filename='main.py',
+        mode=MODE_BACKTEST,
+        token='49e81a42b44bcee45aa03ddda29c390af9678813',  # 替换成你的Token
+        backtest_start_time='2025-01-01 09:00:00',
+        backtest_end_time='2026-06-02 15:00:00',
+        backtest_initial_cash=100000,
+        backtest_adjust=ADJUST_PREV,
+        backtest_commission_ratio=0.0002)
