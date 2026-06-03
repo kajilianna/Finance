@@ -1,0 +1,72 @@
+# 双均线策略 - 人工智能通识课项目
+# 策略逻辑：5日均线上穿20日均线买入，下穿卖出
+
+from gm.api import *
+
+def init(context):
+    # 交易标的：平安银行（你也可以改成其他股票）
+    context.symbol = 'SZSE.000001'
+    # 短期均线周期
+    context.short_window = 5
+    # 长期均线周期
+    context.long_window = 20
+    
+    # 订阅行情数据
+    subscribe(symbols=context.symbol, frequency='1d', count=context.long_window + 1)
+
+def on_bar(context, bars):
+    symbol = context.symbol
+    
+    # 获取当前时间
+    now = context.now
+    
+    # 计算回看日期（往前推足够天数，保证数据充足）
+    from datetime import timedelta
+    start_date = (now - timedelta(days=context.long_window + 10)).strftime('%Y-%m-%d')
+    end_date = now.strftime('%Y-%m-%d')
+    
+    # 获取历史收盘价
+    hist = history(symbol=symbol, frequency='1d', 
+                   start_time=start_date, 
+                   end_time=end_date,
+                   fields='close', 
+                   df=True)
+    
+    # 如果数据不足，跳过
+    if hist is None or len(hist) < context.long_window:
+        return
+    
+    # 计算短期和长期均线
+    short_ma = hist['close'][-context.short_window:].mean()
+    long_ma = hist['close'][-context.long_window:].mean()
+    
+    # 获取当前持仓（指定多头方向）
+    position = context.account().position(symbol, side=PositionSide_Long)
+    
+    # 判断是否已持仓（持仓数量 > 0）
+    has_position = position.volume > 0 if position else False
+    
+    # 金叉买入信号：短均线上穿长均线，且当前无持仓
+    if short_ma > long_ma and not has_position:
+        # 买入：side=OrderSide_Buy（买），position_effect=PositionEffect_Open（开仓）
+        order_percent(symbol, percent=1, side=OrderSide_Buy, 
+                      order_type=OrderType_Market, position_effect=PositionEffect_Open)
+        print(f'{now} 金叉买入 {symbol}，短均线={short_ma:.2f}，长均线={long_ma:.2f}')
+    
+    # 死叉卖出信号：短均线下穿长均线，且当前有持仓
+    elif short_ma < long_ma and has_position:
+        # 卖出：side=OrderSide_Sell（卖），position_effect=PositionEffect_Close（平仓）
+        order_percent(symbol, percent=1, side=OrderSide_Sell, 
+                      order_type=OrderType_Market, position_effect=PositionEffect_Close)
+        print(f'{now} 死叉卖出 {symbol}，短均线={short_ma:.2f}，长均线={long_ma:.2f}')
+
+if __name__ == '__main__':
+    run(strategy_id='YOUR_STRATEGY_ID',  # 替换成你的策略ID
+        filename='main.py',
+        mode=MODE_BACKTEST,
+        token='YOUR_TOKEN',  # 替换成你的Token
+        backtest_start_time='2023-01-01 09:00:00',
+        backtest_end_time='2023-12-31 15:00:00',
+        backtest_initial_cash=100000,
+        backtest_adjust=ADJUST_PREV,
+        backtest_commission_ratio=0.0002)
